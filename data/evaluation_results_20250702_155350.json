@@ -1,0 +1,28 @@
+{
+  "exact_accuracy": 0.6363636363636364,
+  "precision": 1.0,
+  "recall": 0.6363636363636364,
+  "f1_score": 0.7777777777777778,
+  "within_1_accuracy": 0.9523809523809523,
+  "within_2_accuracy": 1.0,
+  "within_3_accuracy": 1.0,
+  "within_5_accuracy": 1.0,
+  "windowed_accuracy": 1.0,
+  "mean_distance": 0.0,
+  "median_distance": 0.0,
+  "boundary_count_diff": 8,
+  "boundary_precision": 1.0,
+  "boundary_recall": 0.6363636363636364,
+  "min_distance": "0",
+  "max_distance": "0",
+  "true_positive_rate": 0.6363636363636364,
+  "false_positive_rate": 0,
+  "predicted_boundaries": "14",
+  "actual_boundaries": "22",
+  "confusion_matrix": {
+    "tp": "14",
+    "fp": "0",
+    "tn": "0",
+    "fn": "8"
+  }
+}
