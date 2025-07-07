@@ -37,8 +37,8 @@ class SessionDetector:
         os.makedirs(self.prompts_folder, exist_ok=True)
         print(f"Created prompts folder: {self.prompts_folder}")
     
-    def _save_prompt_as_markdown(self, system_prompt: str, user_prompt: str, message_id: str):
-        """Save system and user prompts as markdown file."""
+    def _save_prompt_as_markdown(self, system_prompt: str, user_prompt: str, message_id: str, classification_result: int):
+        """Save system and user prompts as markdown file with LLM classification result."""
         if not self.prompts_folder:
             return
         
@@ -51,11 +51,13 @@ class SessionDetector:
             f.write("## System Prompt\n\n")
             f.write(f"```\n{system_prompt}\n```\n\n")
             f.write("## User Prompt\n\n")
-            f.write(f"```\n{user_prompt}\n```\n")
+            f.write(f"```\n{user_prompt}\n```\n\n")
+            f.write("## LLM Classification Result\n\n")
+            f.write(f"**Classification:** {classification_result}\n\n")
+            f.write(f"**Interpretation:** {'New session start' if classification_result == 1 else 'Continue existing session'}\n")
         
-        self.saved_prompts_count += 1
-        print(f"Saved prompt {self.saved_prompts_count}/{self.config.save_prompts_count} to {filename}")
-    
+        self.saved_prompts_count += 1    
+        
     def classify_message(
         self, 
         message_window: List[Dict],
@@ -66,15 +68,10 @@ class SessionDetector:
         prompt = build_prompt(message_window, current_message, additional_examples)
         system_prompt = SYSTEM_PROMPT + "\n\nRespond with 0 if the message continues the existing session, or 1 if it starts a new session."
         
-        # randomly save prompts for debugging
-        if (self.config.save_prompts_count > 0 and 
-            self.saved_prompts_count < self.config.save_prompts_count):
-            # calculate probability to save this prompt
-            # we want to save approximately save_prompts_count prompts randomly
-            # simple approach: save if random number is low enough
-            if random.random() < 0.1:  # 10% chance to save each prompt
-                message_id = current_message.get('gpt_stream_id', 'unknown')
-                self._save_prompt_as_markdown(system_prompt, prompt, message_id)
+        # determine if we should save this prompt (before classification)
+        should_save_prompt = (self.config.save_prompts_count > 0 and 
+                              self.saved_prompts_count < self.config.save_prompts_count and
+                              random.random() < 0.1)  # 10% chance to save each prompt
         
         for attempt in range(self.config.max_retries):
             try:
@@ -90,11 +87,22 @@ class SessionDetector:
                 )
                 
                 result = response.choices[0].message.parsed
-                return result.is_new_session if result else 0
+                classification_result = result.is_new_session if result else 0
+                
+                # save prompt with classification result after successful classification
+                if should_save_prompt:
+                    message_id = current_message.get('gpt_stream_id', 'unknown')
+                    self._save_prompt_as_markdown(system_prompt, prompt, message_id, classification_result)
+                
+                return classification_result
                 
             except Exception as e:
                 if attempt == self.config.max_retries - 1:
                     print(f"Error classifying message: {e}")
+                    # save prompt with error result if we were going to save it
+                    if should_save_prompt:
+                        message_id = current_message.get('gpt_stream_id', 'unknown')
+                        self._save_prompt_as_markdown(system_prompt, prompt, message_id, 0)  # default to 0 on error
                     return 0
                 time.sleep(2 ** attempt)
     
