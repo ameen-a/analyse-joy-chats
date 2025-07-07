@@ -8,7 +8,7 @@ def format_message_for_prompt(row: pd.Series) -> str:
     role = row['user_role'] if pd.notna(row['user_role']) else row['agent_role']
     channel = row.get('channel_type', 'unknown')
     
-    return f"{time_indicator} {role} ({channel}): {row['text'][:500]}"  # truncate long messages
+    return f"{time_indicator} {role} ({channel}): {row['text'][:1000]}"  # truncate long messages
 
 def get_message_window(
     df: pd.DataFrame, 

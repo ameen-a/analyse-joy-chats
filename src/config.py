@@ -9,5 +9,5 @@ class Config:
     temperature: float = 0.1
     max_retries: int = 3
     batch_size: int = 5  # progress bar
-    max_dataset_size: int = 25  # minimum target dataset size (will include complete conversations to reach at least this many messages)
+    max_dataset_size: int = 10  # minimum target dataset size (will include complete conversations to reach at least this many messages)
     save_prompts_count: int = 5  # number of random prompts to save as markdown for debugging
