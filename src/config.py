@@ -4,7 +4,9 @@ from dataclasses import dataclass
 class Config:
     min_messages_threshold: int = 1  # reduced from 10 to include more users
     sliding_window_size: int = 6
-    model: str = "gpt-4o"
+    # model: str = "gpt-4.1-2025-04-14"
+    model: str = "gpt-4.1-mini-2025-04-14"
+    # model: str = "gpt-4o"
     # model: str = "o4-mini-2025-04-16"
     temperature: float = 0.1
     max_retries: int = 3
