@@ -487,9 +487,14 @@ class SessionDetector:
         return result_df
 
 def main():
+    # track total execution time
+    start_time = time.time()
+    
     # load data
+    data_load_start = time.time()
     df = pd.read_excel('../data/labelled_joy_sessions.xlsx')
     df['created_at'] = pd.to_datetime(df['created_at'])
+    data_load_time = time.time() - data_load_start
     
     print(f"Loaded {len(df)} messages from {df['customer_id'].nunique()} users")
     
@@ -502,15 +507,21 @@ def main():
     """
     
     # process using batch processing (new optimized approach)
+    processing_start = time.time()
     result_df = detector.process_dataframe_batch(df, additional_examples)
+    processing_time = time.time() - processing_start
     
     # save results
+    save_start = time.time()
     output_path = f'../data/session_detection_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
     result_df.to_excel(output_path, index=False)
+    save_time = time.time() - save_start
     print(f"\nResults saved to {output_path}")
     
     # if ground truth labels exist, calculate comprehensive metrics
+    evaluation_time = 0
     if 'is_session_start' in df.columns:
+        eval_start = time.time()
         from evaluation_metrics import SessionBoundaryEvaluator
         
         # now all messages have predictions (no NaN values due to fillna(0))
@@ -529,6 +540,24 @@ def main():
         evaluator = SessionBoundaryEvaluator()
         evaluation_results = evaluator.evaluate_comprehensive(predictions, ground_truth)
         evaluator.print_evaluation_report(evaluation_results, "SessionDetector")
+        evaluation_time = time.time() - eval_start
+        
+        # calculate total execution time
+        total_time = time.time() - start_time
+        
+        # add timing information to evaluation results
+        evaluation_results['timing'] = {
+            'total_time_seconds': total_time,
+            'data_load_time_seconds': data_load_time,
+            'processing_time_seconds': processing_time,
+            'save_time_seconds': save_time,
+            'evaluation_time_seconds': evaluation_time,
+            'total_time_formatted': f"{total_time:.2f}s",
+            'data_load_time_formatted': f"{data_load_time:.2f}s",
+            'processing_time_formatted': f"{processing_time:.2f}s",
+            'save_time_formatted': f"{save_time:.2f}s",
+            'evaluation_time_formatted': f"{evaluation_time:.2f}s"
+        }
         
         # save evaluation results  
         import json
@@ -536,6 +565,32 @@ def main():
         with open(eval_path, 'w') as f:
             json.dump(evaluation_results, f, indent=2, default=str)
         print(f"\nDetailed evaluation results saved to {eval_path}")
+        
+        # print timing information to terminal
+        print(f"\n{'='*50}")
+        print(f"EXECUTION TIMING")
+        print(f"{'='*50}")
+        print(f"Data loading:     {data_load_time:.2f}s")
+        print(f"Processing:       {processing_time:.2f}s")
+        print(f"Saving results:   {save_time:.2f}s")
+        print(f"Evaluation:       {evaluation_time:.2f}s")
+        print(f"{'='*50}")
+        print(f"Total runtime:    {total_time:.2f}s")
+        print(f"{'='*50}")
+    else:
+        # calculate total execution time (no evaluation case)
+        total_time = time.time() - start_time
+        
+        # print timing information to terminal
+        print(f"\n{'='*50}")
+        print(f"EXECUTION TIMING")
+        print(f"{'='*50}")
+        print(f"Data loading:     {data_load_time:.2f}s")
+        print(f"Processing:       {processing_time:.2f}s")
+        print(f"Saving results:   {save_time:.2f}s")
+        print(f"{'='*50}")
+        print(f"Total runtime:    {total_time:.2f}s")
+        print(f"{'='*50}")
 
 if __name__ == "__main__":
     main()
