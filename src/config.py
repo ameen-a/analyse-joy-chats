@@ -2,11 +2,17 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
-    min_messages_threshold: int = 1  # reduced from 10 to include more users
-    sliding_window_size: int = 6
-    model: str = "gpt-4.1-2025-04-14"
+    min_messages_threshold: int = 8  # minimum conversation length for batch processing
+    sliding_window_size: int = 6  # context window for individual message classification (legacy)
+    
+    # batch processing parameters
+    batch_window_size: int = 10        # messages per batch window
+    batch_overlap: int = 3             # overlap between consecutive windows
+    auto_session_start_count: int = 4  # first N messages automatically marked as session starts
+    
+    # model: str = "gpt-4.1-2025-04-14"
     # model: str = "gpt-4.1-mini-2025-04-14"
-    # model: str = "gpt-4o"
+    model: str = "gpt-4o"
     # model: str = "o4-mini-2025-04-16"
     temperature: float = 0.1
     max_retries: int = 3

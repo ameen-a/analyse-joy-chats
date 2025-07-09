@@ -100,6 +100,80 @@ Is this current message the start of a new session? Think step by step:
 
 Your decision here: (respond with ONLY "1" for new session or "0" for same session/continuation):"""
 
+# batch processing prompts
+BATCH_SYSTEM_PROMPT = """You are an expert at identifying session boundaries in customer service chats.
+
+**CORE PRINCIPLE**: Only create new sessions for genuinely distinct, unrelated intents. Default to continuation unless there's a clear topic shift.
+
+**DECISION CRITERIA**:
+• **Same session**: Follow-ups, clarifications, elaborations on recent topics
+• **Same session**: Related sub-topics within same domain (e.g., different aspects of weight loss)  
+• **Same session**: Time gaps alone (even days) don't create boundaries
+• **New session**: Fundamentally different intent that cannot connect to prior context
+• **New session**: Joy's automated messages (prescriptions, check-ins, tasks)
+
+You will see a sequence of messages with metadata in the format:
+[INDEX] [time_since_last_message], [role]: [message_text]
+
+- INDEX: The message position in the batch (0-based)
+- time_since_last_message indicators: +Xs (seconds), +Xm (minutes), +Xh (hours), +Xd (days)
+- [START] marks the very first message from a user ever.
+- [SESSION_START] marks a conversation beginning of a new session that has already been classified as a session start.
+- The [role] can be one of the following:
+    - patient: the human customer using the chat.
+    - joy: our virtual AI assistant
+    - agent: a human agent who is helping the patient
+- The first four messages from each customer are automatically marked as session starts.
+- Note that our AI system Joy sends a lot of automated messages to the patient. These should be considered as session starts (mark as 1).
+Examples of Joy's messages to mark as 1:
+- "Hi Damian, I'm Coach Joy, your AI-powered coach..."
+- "I'm here whenever you need me, Alice — what's on your mind today?.."
+- "Hi Zara, Great news – your prescription for your Mounjaro 5mg has been approved 🎉.."
+- "Hi Corey! 🌼 It's been a little while since we last caught up"
+
+Respond with a JSON array of indices (0-based) that represent session starts. For example:
+- [0, 3, 7] means messages at positions 0, 3, and 7 are session starts
+- [] means no session starts in this batch
+- [0] means only the first message is a session start
+"""
+
+BATCH_USER_PROMPT_TEMPLATE = """
+Examples of session boundaries:
+
+EXAMPLE 1 - Clear topic shift:
+[2] [+2m] patient: okay sounds good
+[3] [+4s] patient: thanks
+[4] [+4s] joy : You're welcome! Is there anything else I can help you with?
+[5] [+45s] patient: actually yes
+[6] [+20s] patient: can you help me book an appointment with my coach? <-- NEW SESSION (prescription help → appointment booking)
+
+EXAMPLE 2 - Continuation despite time gap:
+[1] [+10s] agent: Excellent, that's a great idea!
+[2] [+2m] patient: Okay great
+[3] [+3h] patient: What dosage?
+[4] [+10s] agent: I recommended starting with 0.25mg weekly for the first week, and we'll monitor from there. 
+[5] [+2d] patient: If I have been taking 0.25mg, when do I increase? <-- SAME SESSION (continuing same dosage topic)
+
+EXAMPLE 3 - Joy messages:
+[0] [+4d] [SESSION_START] joy: Hi Hamda, To safely continue your treatment, we need some update information about you. Please complete your outstanding tasks [on the account page here](https://www.joinvoy.com/account/health-actions) - it only takes a few minutes. Please let me know if you have any questions. I'm happy to support you 🙂
+[1] [+4d] [SESSION_START] joy: Hi Hamda, To safely continue your treatment, we need some update information about you. Please complete your outstanding tasks [on the account page here](https://www.joinvoy.com/account/health-actions) - it only takes a few minutes.
+[2] [+1d] [SESSION_START] joy: Great news – your prescription for your **Mounjaro 7.5mg** has been approved 🎉.
+[3] [+4d] [SESSION_START] joy: Hi Hamda! 🌟 I hope you're doing well. I wanted to check in since it's been a little while since we last chatted. How are you feeling about your treatment and cravings? Have you noticed any changes since starting the 7.5mg? No rush to reply—just here to support you!
+[4] [+4d] joy: Hi Hamda! 😊 Just wanted to check in and see how things are going since you started the 7.5mg. How have your cravings been? Any wins or challenges you'd like to share? I'm here to help! <-- NEW SESSION (more joy automated messages)
+
+\n----------------------------------------\n
+Now analyse this batch of messages:
+{batch_messages}
+\n----------------------------------------\n
+
+Identify which messages (by index) are session starts. Think step by step:
+1. Look for topic shifts between messages
+2. Identify Joy's automated messages (typically session starts)
+3. Consider time gaps and context flow
+4. Be conservative - prefer continuation over new sessions
+
+Return only a JSON array of indices (0-based) that are session starts:"""
+
 def build_prompt(
     message_window: List[Dict],
     current_message: Dict,
@@ -149,4 +223,41 @@ def build_prompt(
         additional_examples=additional_examples,
         conversation_context=conversation_context,
         current_message=current_msg_formatted
+    )
+
+def build_batch_prompt(
+    message_batch: List[Dict],
+    window_start_idx: int = 0
+) -> str:
+    """Build the batch classification prompt."""
+    batch_lines = []
+    
+    for i, msg in enumerate(message_batch):
+        time_indicator = f"[{msg.get('time_since_last', 'FIRST')}]"
+        role = msg.get('user_role') or msg.get('agent_role', 'unknown')
+        channel = msg.get('channel_type', 'unknown')
+        
+        # handle NaN values by converting to string first
+        text_raw = msg.get('text', '')
+        text = str(text_raw) if text_raw is not None and str(text_raw) != 'nan' else ''
+        text = text[:500]
+        
+        # add classification info if available
+        session_marker = ""
+        if 'is_session_start_pred' in msg and msg['is_session_start_pred'] == 1:
+            session_marker = "[SESSION_START] "
+        
+        # include index in the format
+        batch_idx = window_start_idx + i
+        
+        # only include channel type if it's not unknown
+        if channel != 'unknown':
+            batch_lines.append(f"[{i}] {time_indicator} {session_marker}{role} ({channel}): {text}")
+        else:
+            batch_lines.append(f"[{i}] {time_indicator} {session_marker}{role}: {text}")
+    
+    batch_messages = "\n".join(batch_lines)
+    
+    return BATCH_USER_PROMPT_TEMPLATE.format(
+        batch_messages=batch_messages
     )

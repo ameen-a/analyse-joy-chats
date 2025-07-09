@@ -11,12 +11,16 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from config import Config
-from prompts import SYSTEM_PROMPT, build_prompt
+from prompts import SYSTEM_PROMPT, build_prompt, BATCH_SYSTEM_PROMPT, build_batch_prompt
 from utils import get_message_window, assign_session_ids
 
 class SessionClassification(BaseModel):
     """Structured output for session boundary classification."""
     is_new_session: int  # 0 or 1
+
+class BatchSessionClassification(BaseModel):
+    """Structured output for batch session boundary classification."""
+    session_start_indices: List[int]  # list of 0-based indices that are session starts
 
 class SessionDetector:
     def __init__(self, config: Config = Config()):
@@ -54,7 +58,12 @@ class SessionDetector:
             f.write(f"```\n{user_prompt}\n```\n\n")
             f.write("## LLM Classification Result\n\n")
             f.write(f"**Classification:** {classification_result}\n\n")
-            f.write(f"**Interpretation:** {'New session start' if classification_result == 1 else 'Continue existing session'}\n")
+            
+            # interpret result based on whether it's batch or individual classification
+            if message_id.startswith('batch_'):
+                f.write(f"**Interpretation:** Found {classification_result} session start(s) in batch\n")
+            else:
+                f.write(f"**Interpretation:** {'New session start' if classification_result == 1 else 'Continue existing session'}\n")
         
         self.saved_prompts_count += 1    
         
@@ -105,6 +114,245 @@ class SessionDetector:
                         self._save_prompt_as_markdown(system_prompt, prompt, message_id, 0)  # default to 0 on error
                     return 0
                 time.sleep(2 ** attempt)
+    
+    def classify_message_batch(
+        self,
+        message_batch: List[Dict],
+        window_start_idx: int = 0
+    ) -> List[int]:
+        """Classify a batch of messages using structured outputs."""
+        prompt = build_batch_prompt(message_batch, window_start_idx)
+        system_prompt = BATCH_SYSTEM_PROMPT
+        
+        # determine if we should save this prompt (before classification)
+        should_save_prompt = (self.config.save_prompts_count > 0 and 
+                              self.saved_prompts_count < self.config.save_prompts_count and
+                              random.random() < 0.1)  # 10% chance to save each prompt
+        
+        for attempt in range(self.config.max_retries):
+            try:
+                response = self.client.beta.chat.completions.parse(
+                    model=self.config.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format=BatchSessionClassification,
+                    temperature=self.config.temperature,
+                    max_tokens=200
+                )
+                
+                result = response.choices[0].message.parsed
+                if result:
+                    # validate indices are within bounds
+                    valid_indices = [idx for idx in result.session_start_indices 
+                                   if 0 <= idx < len(message_batch)]
+                    
+                    # save prompt with classification result after successful classification
+                    if should_save_prompt:
+                        batch_id = f"batch_{window_start_idx}_{len(message_batch)}"
+                        self._save_prompt_as_markdown(system_prompt, prompt, batch_id, len(valid_indices))
+                    
+                    return valid_indices
+                else:
+                    # save prompt with no results if we were going to save it
+                    if should_save_prompt:
+                        batch_id = f"batch_{window_start_idx}_{len(message_batch)}"
+                        self._save_prompt_as_markdown(system_prompt, prompt, batch_id, 0)
+                    return []
+                    
+            except Exception as e:
+                if attempt == self.config.max_retries - 1:
+                    print(f"Error classifying batch: {e}")
+                    # save prompt with error result if we were going to save it
+                    if should_save_prompt:
+                        batch_id = f"batch_{window_start_idx}_{len(message_batch)}"
+                        self._save_prompt_as_markdown(system_prompt, prompt, batch_id, 0)  # default to 0 on error
+                    return []
+                time.sleep(2 ** attempt)
+        
+        return []
+
+    def process_dataframe_batch(
+        self,
+        df: pd.DataFrame,
+        additional_examples: str = ""
+    ) -> pd.DataFrame:
+        """Process entire dataframe using batch classification."""
+        # first, filter users with minimum messages to ensure we only consider valid users
+        user_message_counts = df.groupby('customer_id').size()
+        valid_users = user_message_counts[user_message_counts >= self.config.min_messages_threshold].index
+        df_valid_users = df[df['customer_id'].isin(valid_users)].copy()
+        
+        print(f"Filtered to {len(df_valid_users)} messages from {len(valid_users)} users (minimum {self.config.min_messages_threshold} messages per user)")
+        
+        # ensure we get AT LEAST the target dataset size (not just close to it)
+        if self.config.max_dataset_size and len(df_valid_users) > self.config.max_dataset_size:
+            # sort by customer and time to ensure consistent sampling
+            df_sorted = df_valid_users.sort_values(['customer_id', 'created_at'])
+            
+            # get user message counts for optimisation
+            user_msg_counts = df_sorted.groupby('customer_id').size().to_dict()
+            users_list = list(user_msg_counts.keys())
+            
+            # find the combination that gets us AT LEAST the target size
+            # keep adding users until we reach at least the target
+            selected_users = []
+            current_count = 0
+            
+            for user in users_list:
+                selected_users.append(user)
+                current_count += user_msg_counts[user]
+                
+                # stop once we have AT LEAST the target number of messages
+                if current_count >= self.config.max_dataset_size:
+                    break
+            
+            # if we still don't have enough, add more users
+            if current_count < self.config.max_dataset_size:
+                remaining_users = [u for u in users_list if u not in selected_users]
+                for user in remaining_users:
+                    selected_users.append(user)
+                    current_count += user_msg_counts[user]
+                    if current_count >= self.config.max_dataset_size:
+                        break
+            
+            # filter to only include complete conversations for selected users
+            df_filtered = df_sorted[df_sorted['customer_id'].isin(selected_users)]
+            
+            print(f"Selected {len(df_filtered)} messages from {len(selected_users)} users (target: AT LEAST {self.config.max_dataset_size})")
+            print(f"Included complete conversations to ensure minimum target is met")
+        else:
+            df_filtered = df_valid_users
+        
+        # sort by customer and time to identify first N messages per customer
+        df_filtered = df_filtered.sort_values(['customer_id', 'created_at'])
+        
+        # mark first N messages per customer as session starts (1) 
+        def mark_first_messages(group):
+            group = group.copy()
+            # mark first auto_session_start_count messages as session starts
+            for i in range(min(self.config.auto_session_start_count, len(group))):
+                self.classifications[group.iloc[i]['gpt_stream_id']] = 1
+            return group
+        
+        # suppress pandas FutureWarning for groupby apply
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            df_filtered = df_filtered.groupby('customer_id', group_keys=False).apply(mark_first_messages)
+        
+        # now process remaining messages using batch classification
+        messages_to_classify = []
+        for customer_id in df_filtered['customer_id'].unique():
+            customer_msgs = df_filtered[df_filtered['customer_id'] == customer_id].sort_values('created_at')
+            if len(customer_msgs) > self.config.auto_session_start_count:
+                # collect messages that need batch classification
+                remaining_msgs = customer_msgs.iloc[self.config.auto_session_start_count:]
+                messages_to_classify.extend(remaining_msgs.index.tolist())
+        
+        df_to_classify = df_filtered.loc[messages_to_classify] if messages_to_classify else pd.DataFrame()
+        
+        print(f"Automatically marked first {self.config.auto_session_start_count} messages per customer as session starts")
+        print(f"Processing {len(df_to_classify)} additional messages for batch classification from {df_filtered['customer_id'].nunique()} users")
+        
+        # sort by channel and time for batch classification
+        df_to_classify = df_to_classify.sort_values(['gpt_channel_id', 'created_at'])
+        
+        # group messages by channel for batch processing
+        processed_messages = set()
+        channels = df_to_classify['gpt_channel_id'].unique()
+        
+        # calculate total batches for overall progress
+        total_batches = 0
+        for channel_id in channels:
+            channel_messages = df_to_classify[df_to_classify['gpt_channel_id'] == channel_id]
+            total_messages = len(channel_messages)
+            if total_messages > 0:
+                batches_in_channel = max(1, (total_messages - self.config.batch_window_size) // (self.config.batch_window_size - self.config.batch_overlap) + 1)
+                total_batches += batches_in_channel
+        
+        # overall progress bar
+        with tqdm(total=total_batches, desc="Processing all channels", unit="batch", position=0) as overall_pbar:
+            for channel_id in channels:
+                channel_messages = df_to_classify[df_to_classify['gpt_channel_id'] == channel_id].copy()
+                
+                # process this channel with sliding windows
+                self._process_channel_batch(channel_messages, processed_messages, overall_pbar)
+        
+        # ensure all messages have classifications (default to 0 if not processed)
+        for idx, row in df_to_classify.iterrows():
+            if row['gpt_stream_id'] not in self.classifications:
+                self.classifications[row['gpt_stream_id']] = 0
+        
+        # assign session IDs to the filtered dataset
+        result_df = assign_session_ids(df_filtered, self.classifications)
+        
+        print(f"\nDetected {result_df['session_id'].nunique()} sessions")
+        print(f"Average messages per session: {len(result_df) / result_df['session_id'].nunique():.1f}")
+        
+        return result_df
+
+    def _process_channel_batch(self, channel_messages: pd.DataFrame, processed_messages: set, overall_pbar):
+        """Process a single channel using sliding windows with overlap."""
+        messages_list = channel_messages.to_dict('records')
+        total_messages = len(messages_list)
+        
+        if total_messages == 0:
+            return
+        
+        # collect all session start decisions from overlapping windows
+        session_start_votes = {}  # message_id -> count of votes for session start
+        
+        # sliding window with overlap
+        window_size = self.config.batch_window_size
+        overlap = self.config.batch_overlap
+        step = window_size - overlap
+        
+        channel_id = channel_messages.iloc[0]['gpt_channel_id']
+        batches_in_channel = max(1, (total_messages - window_size) // step + 1)
+        
+        with tqdm(total=batches_in_channel, 
+                 desc=f"Channel {channel_id} ({total_messages} msgs)", 
+                 unit="batch", position=1, leave=False) as channel_pbar:
+            
+            for start_idx in range(0, total_messages, step):
+                end_idx = min(start_idx + window_size, total_messages)
+                window_messages = messages_list[start_idx:end_idx]
+                
+                # skip if window is too small
+                if len(window_messages) < 2:
+                    break
+                
+                # classify batch
+                session_start_indices = self.classify_message_batch(window_messages, start_idx)
+                
+                # record votes
+                for rel_idx in session_start_indices:
+                    abs_idx = start_idx + rel_idx
+                    if abs_idx < total_messages:
+                        message_id = messages_list[abs_idx]['gpt_stream_id']
+                        session_start_votes[message_id] = session_start_votes.get(message_id, 0) + 1
+                
+                channel_pbar.update(1)
+                overall_pbar.update(1)
+                
+                # if we've processed all messages, break
+                if end_idx >= total_messages:
+                    break
+        
+        # apply union approach - any message that got votes becomes a session start
+        # but prefer continuation (recall is more important, so we're conservative)
+        for message in messages_list:
+            message_id = message['gpt_stream_id']
+            
+            if message_id in session_start_votes:
+                # default to continue (0) unless we have strong evidence for session start
+                self.classifications[message_id] = 1 if session_start_votes[message_id] >= 1 else 0
+            else:
+                # no votes for session start, so continue
+                self.classifications[message_id] = 0
+            
+            processed_messages.add(message_id)
     
     def process_dataframe(
         self, 
@@ -253,8 +501,8 @@ def main():
     # Add your specific examples here if needed
     """
     
-    # process
-    result_df = detector.process_dataframe(df, additional_examples)
+    # process using batch processing (new optimized approach)
+    result_df = detector.process_dataframe_batch(df, additional_examples)
     
     # save results
     output_path = f'../data/session_detection_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
